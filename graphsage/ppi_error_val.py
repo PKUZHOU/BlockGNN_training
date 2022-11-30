@@ -17,9 +17,9 @@ from graphsage.utils import load_data
 os.environ["CUDA_DEVICE_ORDER"]="PCI_BUS_ID"
 
 # Set random seed
-seed = 123
-np.random.seed(seed)
-tf.set_random_seed(seed)
+# seed = 123
+# np.random.seed(seed)
+# tf.set_random_seed(seed)
 
 # Settings
 flags = tf.app.flags
@@ -51,7 +51,6 @@ flags.DEFINE_integer('identity_dim', 0, 'Set to positive value to use identity e
 #logging, saving, validation settings etc.
 flags.DEFINE_string('base_log_dir', '.', 'base directory for logging and saving embeddings')
 flags.DEFINE_integer('validate_iter', 5000, "how often to run a validation minibatch.")
-# flags.DEFINE_integer('validate_batch_size', 128, "how many nodes per validation sample.")
 flags.DEFINE_integer('validate_batch_size', 256, "how many nodes per validation sample.")
 flags.DEFINE_integer('gpu', 0, "which gpu to use.")
 flags.DEFINE_integer('print_every', 5, "How often to print training info.")
@@ -191,8 +190,7 @@ def train(train_data, test_data=None):
                                      model_size=FLAGS.model_size,
                                      concat=False,
                                      sigmoid_loss = FLAGS.sigmoid,
-                                     identity_dim = FLAGS.identity_dim,                                     
-                                     block_size = FLAGS.block_size,
+                                     identity_dim = FLAGS.identity_dim,
                                      logging=True)
 
     elif FLAGS.model == 'graphsage_seq':
@@ -256,32 +254,11 @@ def train(train_data, test_data=None):
                                     minibatch.deg,
                                      layer_infos=layer_infos, 
                                      aggregator_type="gat",
-                                     concat=False,
                                      model_size=FLAGS.model_size,
                                      sigmoid_loss = FLAGS.sigmoid,
                                      identity_dim = FLAGS.identity_dim,
                                      block_size= FLAGS.block_size,
                                      logging=True)
-
-    elif FLAGS.model == 'ggcn':
-        sampler = UniformNeighborSampler(adj_info)
-        layer_infos = [SAGEInfo("node", sampler, FLAGS.samples_1, FLAGS.dim_1),
-                            SAGEInfo("node", sampler, FLAGS.samples_2, FLAGS.dim_2)]
-
-        model = SupervisedGraphsage(num_classes, placeholders, 
-                                    features,
-                                    adj_info,
-                                    minibatch.deg,
-                                     layer_infos=layer_infos, 
-                                     aggregator_type="ggcn",
-                                     concat=True,
-                                     model_size=FLAGS.model_size,
-                                     sigmoid_loss = FLAGS.sigmoid,
-                                     identity_dim = FLAGS.identity_dim,
-                                     block_size= FLAGS.block_size,
-                                     logging=True)
-
-
 
     else:
         raise Exception('Error: model name unrecognized.')
@@ -307,60 +284,13 @@ def train(train_data, test_data=None):
 
     train_adj_info = tf.assign(adj_info, minibatch.adj)
     val_adj_info = tf.assign(adj_info, minibatch.test_adj)
-    for epoch in range(FLAGS.epochs): 
-        minibatch.shuffle() 
+   
+    saver = tf.train.Saver()
 
-        iter = 0
-        
-        print('Epoch: %04d' % (epoch + 1))
-        epoch_val_costs.append(0)
-        while not minibatch.end():
-            # Construct feed dictionary
-            feed_dict, labels = minibatch.next_minibatch_feed_dict()
-            feed_dict.update({placeholders['dropout']: FLAGS.dropout})
+    saver.restore(sess, "model/ppi")
 
-            t = time.time()
-            # Training step
-            outs = sess.run([merged, model.opt_op, model.loss, model.preds], feed_dict=feed_dict)
-            train_cost = outs[2]
-
-            if iter % FLAGS.validate_iter == 0:
-                # Validation
-                sess.run(val_adj_info.op)
-                if FLAGS.validate_batch_size == -1:
-                    val_cost, val_f1_mic, val_f1_mac, duration = incremental_evaluate(sess, model, minibatch, FLAGS.batch_size)
-                else:
-                    val_cost, val_f1_mic, val_f1_mac, duration = evaluate(sess, model, minibatch, FLAGS.validate_batch_size)
-                sess.run(train_adj_info.op)
-                epoch_val_costs[-1] += val_cost
-
-            if total_steps % FLAGS.print_every == 0:
-                summary_writer.add_summary(outs[0], total_steps)
-    
-            # Print results
-            avg_time = (avg_time * total_steps + time.time() - t) / (total_steps + 1)
-
-            if total_steps % FLAGS.print_every == 0:
-                train_f1_mic, train_f1_mac = calc_f1(labels, outs[-1])
-                print("Iter:", '%04d' % iter, 
-                      "train_loss=", "{:.5f}".format(train_cost),
-                      "train_f1_mic=", "{:.5f}".format(train_f1_mic), 
-                      "train_f1_mac=", "{:.5f}".format(train_f1_mac), 
-                      "val_loss=", "{:.5f}".format(val_cost),
-                      "val_f1_mic=", "{:.5f}".format(val_f1_mic), 
-                      "val_f1_mac=", "{:.5f}".format(val_f1_mac), 
-                      "time=", "{:.5f}".format(avg_time))
- 
-            iter += 1
-            total_steps += 1
-
-            if total_steps > FLAGS.max_total_steps:
-                break
-
-        if total_steps > FLAGS.max_total_steps:
-                break
-    
     print("Optimization Finished!")
+
     sess.run(val_adj_info.op)
     val_cost, val_f1_mic, val_f1_mac, duration = incremental_evaluate(sess, model, minibatch, FLAGS.batch_size)
     print("Full validation stats:",
@@ -377,6 +307,10 @@ def train(train_data, test_data=None):
     with open(log_dir() + "test_stats.txt", "w") as fp:
         fp.write("loss={:.5f} f1_micro={:.5f} f1_macro={:.5f}".
                 format(val_cost, val_f1_mic, val_f1_mac))
+    
+    
+    saver = tf.train.Saver() 
+    saver.save(sess, "model/ppi")
 
 def main(argv=None):
     print("Loading training data..")

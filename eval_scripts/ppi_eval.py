@@ -42,7 +42,7 @@ if __name__ == '__main__':
     print("Loading data...")
     G = json_graph.node_link_graph(json.load(open(dataset_dir + "/ppi-G.json")))
     labels = json.load(open(dataset_dir + "/ppi-class_map.json"))
-    labels = {int(i):l for i, l in labels.iteritems()}
+    labels = {int(i):l for i, l in labels.items()}
     
     train_ids = [n for n in G.nodes() if not G.node[n]['val'] and not G.node[n]['test']]
     test_ids = [n for n in G.nodes() if G.node[n][setting]]

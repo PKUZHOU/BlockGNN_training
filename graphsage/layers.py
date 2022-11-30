@@ -2,6 +2,7 @@ from __future__ import division
 from __future__ import print_function
 
 import tensorflow as tf
+import numpy as np
 
 from graphsage.inits import zeros
 
@@ -113,4 +114,171 @@ class Dense(Layer):
         if self.bias:
             output += self.vars['bias']
 
-        return self.act(output)
+        if self.act:
+            return self.act(output)
+
+        
+        return output
+
+class BCM(Layer):
+    """Block circulant matrix layer."""
+    def __init__(self, input_dim, output_dim, dropout=0., 
+                 act=tf.nn.relu, placeholders=None, bias=True, featureless=False, 
+                 sparse_inputs=False, block_size = 8, decay = True, **kwargs):
+        super(BCM, self).__init__(**kwargs)
+
+        self.dropout = dropout
+
+        self.act = act
+        self.featureless = featureless
+        self.bias = bias
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.use_rfft = False
+
+        self.p = self.output_dim//block_size
+        self.q = self.input_dim//block_size
+
+        if(self.input_dim % block_size > 0):
+            self.q += 1
+
+        if(self.output_dim % block_size > 0):
+            self.p += 1
+
+        self.k = block_size
+
+        # helper variable for sparse dropout
+        self.sparse_inputs = sparse_inputs
+        if sparse_inputs:
+            self.num_features_nonzero = placeholders['num_features_nonzero']
+        
+        with tf.variable_scope(self.name + '_vars'):
+            self.vars['weights'] = tf.get_variable('weights', shape=(self.p, self.q, self.k,2),
+                                         dtype=tf.float32, 
+                                         initializer=tf.contrib.layers.xavier_initializer(),
+                                         regularizer=tf.contrib.layers.l2_regularizer(FLAGS.weight_decay))
+            if self.bias:
+                self.vars['bias'] = zeros([output_dim], name='bias')
+
+        if self.logging:
+            self._log_vars()
+
+    def _call(self, inputs):
+        x = inputs
+        
+        x = tf.nn.dropout(x, 1-self.dropout)
+
+        # padd the input, make sure that the length of input is multiple of blocksize
+        padd_x_size = self.q * self.k - self.input_dim
+        pad = np.array([[0,0], [0, padd_x_size]])
+        x = tf.pad(x,pad,name='pad_x')
+
+        # devide the input into q blocks
+        x = tf.reshape(x, (-1, self.q, self.k))
+     
+        w = self.vars['weights']
+
+        if(not self.use_rfft):
+            # convert x and w to complex numbers
+            x_complex = tf.complex(x, tf.zeros(tf.shape(x)))
+            w_complex = tf.complex(w[...,0],w[...,1])
+
+            # RUN fft on x
+            x_freq = tf.fft(x_complex)
+            w_freq = w_complex
+            
+            # element-wise dot 
+            x_freq = x_freq[:,tf.newaxis,...]
+            x_freq = tf.tile(x_freq,[1,self.p,1,1])
+            h_freq = x_freq * w_freq
+
+            # accumulation in the frequency domain
+            h_freq = tf.reduce_sum(h_freq,axis=2)
+
+            # run ifft
+            h = tf.ifft(h_freq)
+
+            #get the real number as result
+            h = tf.real(h)
+            h = tf.reshape(h,(-1,self.p * self.k))
+
+        else:
+            # test rfft
+            x_freq = tf.spectral.rfft(x)
+            w_freq = tf.spectral.rfft(w)
+            x_freq = x_freq[:,tf.newaxis,...]
+            x_freq = tf.tile(x_freq,[1,self.p,1,1])
+            h_freq = x_freq * w_freq
+            h = tf.spectral.irfft(h_freq)
+            h = tf.reduce_sum(h,axis=2)
+            h = tf.reshape(h,(-1,self.p * self.k))
+
+        if self.p * self.k > self.output_dim:
+            h = h[:, :self.output_dim]
+
+        if self.bias:
+            h += self.vars['bias']
+
+        if self.act:
+            return self.act(h)
+        
+        return h
+
+
+class SVD(Layer):
+    """Dense layer."""
+    def __init__(self, input_dim, output_dim, dropout=0., 
+                 act=tf.nn.relu, placeholders=None, bias=True, featureless=False, 
+                 sparse_inputs=False, block_size = 0, **kwargs):
+        super(SVD, self).__init__(**kwargs)
+
+        self.dropout = dropout
+
+        self.act = act
+        self.featureless = featureless
+        self.bias = bias
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.block_size = block_size
+
+        # helper variable for sparse dropout
+        self.sparse_inputs = sparse_inputs
+        if sparse_inputs:
+            self.num_features_nonzero = placeholders['num_features_nonzero']
+
+        with tf.variable_scope(self.name + '_vars'):
+            self.vars['weights'] = tf.get_variable('weights', shape=(input_dim, output_dim),
+                                         dtype=tf.float32, 
+                                         initializer=tf.contrib.layers.xavier_initializer(),
+                                         regularizer=tf.contrib.layers.l2_regularizer(FLAGS.weight_decay))
+            if self.bias:
+                self.vars['bias'] = zeros([output_dim], name='bias')
+
+        if self.logging:
+            self._log_vars()
+
+    def _call(self, inputs):
+        x = inputs
+
+        x = tf.nn.dropout(x, 1-self.dropout)
+
+        # transform
+
+        s,u,v = tf.svd(self.vars['weights'])
+
+        s = s[:self.block_size]
+        u = u[:,:self.block_size]
+        v = v[:,:self.block_size]
+
+        # M = u@tf.diag(s)@tf.transpose(v)
+
+
+        output = x@u@tf.diag(s)@tf.transpose(v)
+
+        # bias
+        if self.bias:
+            output += self.vars['bias']
+
+        if self.act:
+            return self.act(output)
+        return output

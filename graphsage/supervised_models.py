@@ -2,7 +2,7 @@ import tensorflow as tf
 
 import graphsage.models as models
 import graphsage.layers as layers
-from graphsage.aggregators import MeanAggregator, MaxPoolingAggregator, MeanPoolingAggregator, SeqAggregator, GCNAggregator
+from graphsage.aggregators import MeanAggregator, MaxPoolingAggregator, MeanPoolingAggregator, SeqAggregator, GCNAggregator, GatAggregator, GGCNAggregator
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -13,7 +13,7 @@ class SupervisedGraphsage(models.SampleAndAggregate):
     def __init__(self, num_classes,
             placeholders, features, adj, degrees,
             layer_infos, concat=True, aggregator_type="mean", 
-            model_size="small", sigmoid_loss=False, identity_dim=0,
+            model_size="small", sigmoid_loss=False, identity_dim=0, block_size = 0, svd = False, 
                 **kwargs):
         '''
         Args:
@@ -31,6 +31,9 @@ class SupervisedGraphsage(models.SampleAndAggregate):
 
         models.GeneralizedModel.__init__(self, **kwargs)
 
+        self.block_size = block_size
+        self.svd = svd
+
         if aggregator_type == "mean":
             self.aggregator_cls = MeanAggregator
         elif aggregator_type == "seq":
@@ -41,6 +44,10 @@ class SupervisedGraphsage(models.SampleAndAggregate):
             self.aggregator_cls = MaxPoolingAggregator
         elif aggregator_type == "gcn":
             self.aggregator_cls = GCNAggregator
+        elif aggregator_type =='gat':
+            self.aggregator_cls = GatAggregator
+        elif aggregator_type =='ggcn':
+            self.aggregator_cls = GGCNAggregator
         else:
             raise Exception("Unknown aggregator: ", self.aggregator_cls)
 
@@ -78,8 +85,9 @@ class SupervisedGraphsage(models.SampleAndAggregate):
     def build(self):
         samples1, support_sizes1 = self.sample(self.inputs1, self.layer_infos)
         num_samples = [layer_info.num_samples for layer_info in self.layer_infos]
-        self.outputs1, self.aggregators = self.aggregate(samples1, [self.features], self.dims, num_samples,
-                support_sizes1, concat=self.concat, model_size=self.model_size)
+        self.outputs1, self.aggregators = self.aggregate(samples1, [self.features], self.dims,          num_samples,
+                support_sizes1, concat=self.concat, model_size=self.model_size, block_size=self.block_size, svd = self.svd)
+                
         dim_mult = 2 if self.concat else 1
 
         self.outputs1 = tf.nn.l2_normalize(self.outputs1, 1)

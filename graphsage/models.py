@@ -7,7 +7,7 @@ import graphsage.layers as layers
 import graphsage.metrics as metrics
 
 from .prediction import BipartiteEdgePredLayer
-from .aggregators import MeanAggregator, MaxPoolingAggregator, MeanPoolingAggregator, SeqAggregator, GCNAggregator
+from .aggregators import MeanAggregator, MaxPoolingAggregator, MeanPoolingAggregator, SeqAggregator, GCNAggregator, GGCNAggregator
 
 flags = tf.app.flags
 FLAGS = flags.FLAGS
@@ -191,7 +191,7 @@ class SampleAndAggregate(GeneralizedModel):
 
     def __init__(self, placeholders, features, adj, degrees,
             layer_infos, concat=True, aggregator_type="mean", 
-            model_size="small", identity_dim=0,
+            model_size="small", identity_dim=0,block_size = 0,
             **kwargs):
         '''
         Args:
@@ -218,6 +218,8 @@ class SampleAndAggregate(GeneralizedModel):
             self.aggregator_cls = MeanPoolingAggregator
         elif aggregator_type == "gcn":
             self.aggregator_cls = GCNAggregator
+        elif aggregator_type == "ggcn":
+            self.aggregator_cls = GGCNAggregator
         else:
             raise Exception("Unknown aggregator: ", self.aggregator_cls)
 
@@ -276,7 +278,7 @@ class SampleAndAggregate(GeneralizedModel):
 
 
     def aggregate(self, samples, input_features, dims, num_samples, support_sizes, batch_size=None,
-            aggregators=None, name=None, concat=False, model_size="small"):
+            aggregators=None, name=None, concat=False, block_size = 0, svd = False, model_size="small"):
         """ At each layer, aggregate hidden representations of neighbors to compute the hidden representations 
             at next layer.
         Args:
@@ -307,11 +309,11 @@ class SampleAndAggregate(GeneralizedModel):
                 if layer == len(num_samples) - 1:
                     aggregator = self.aggregator_cls(dim_mult*dims[layer], dims[layer+1], act=lambda x : x,
                             dropout=self.placeholders['dropout'], 
-                            name=name, concat=concat, model_size=model_size)
+                            name=name, concat=concat, block_size = block_size, svd = svd, model_size=model_size)
                 else:
                     aggregator = self.aggregator_cls(dim_mult*dims[layer], dims[layer+1],
                             dropout=self.placeholders['dropout'], 
-                            name=name, concat=concat, model_size=model_size)
+                            name=name, concat=concat, block_size = block_size, svd = svd, model_size=model_size)
                 aggregators.append(aggregator)
             else:
                 aggregator = aggregators[layer]

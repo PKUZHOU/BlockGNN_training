@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from .layers import Layer, Dense
+from .layers import Layer, Dense, BCM, SVD
 from .inits import glorot, zeros
 
 class MeanAggregator(Layer):
@@ -10,7 +10,7 @@ class MeanAggregator(Layer):
 
     def __init__(self, input_dim, output_dim, neigh_input_dim=None,
             dropout=0., bias=False, act=tf.nn.relu, 
-            name=None, concat=False, **kwargs):
+            name=None, concat=False, block_size = 0, **kwargs):
         super(MeanAggregator, self).__init__(**kwargs)
 
         self.dropout = dropout
@@ -70,13 +70,14 @@ class GCNAggregator(Layer):
     """
 
     def __init__(self, input_dim, output_dim, neigh_input_dim=None,
-            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, **kwargs):
+            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, block_size=0, svd = False,  **kwargs):
         super(GCNAggregator, self).__init__(**kwargs)
 
         self.dropout = dropout
         self.bias = bias
         self.act = act
         self.concat = concat
+        self.block_size = block_size
 
         if neigh_input_dim is None:
             neigh_input_dim = input_dim
@@ -91,6 +92,18 @@ class GCNAggregator(Layer):
                                                         name='neigh_weights')
             if self.bias:
                 self.vars['bias'] = zeros([self.output_dim], name='bias')
+
+        # print(block_size)
+
+        self.weights = BCM(input_dim = neigh_input_dim,
+                                    output_dim = output_dim,
+                                    act=None,
+                                    dropout=0,
+                                    sparse_inputs=False,
+                                    bias=False,
+                                    block_size= block_size,
+                                    logging=self.logging)
+
 
         if self.logging:
             self._log_vars()
@@ -107,7 +120,10 @@ class GCNAggregator(Layer):
             tf.expand_dims(self_vecs, axis=1)], axis=1), axis=1)
        
         # [nodes] x [out_dim]
-        output = tf.matmul(means, self.vars['weights'])
+        if self.block_size == 0:
+            output = tf.matmul(means, self.vars['weights'])
+        else:
+            output = self.weights(means)
 
         # bias
         if self.bias:
@@ -120,13 +136,16 @@ class MaxPoolingAggregator(Layer):
     """ Aggregates via max-pooling over MLP functions.
     """
     def __init__(self, input_dim, output_dim, model_size="small", neigh_input_dim=None,
-            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, **kwargs):
+            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, block_size = 0, cp_combination = False, svd = False, **kwargs):
         super(MaxPoolingAggregator, self).__init__(**kwargs)
 
         self.dropout = dropout
         self.bias = bias
         self.act = act
         self.concat = concat
+        self.block_size = block_size
+        self.svd = svd
+        self.cp_combination = cp_combination
 
         if neigh_input_dim is None:
             neigh_input_dim = input_dim
@@ -142,19 +161,64 @@ class MaxPoolingAggregator(Layer):
             hidden_dim = self.hidden_dim = 1024
 
         self.mlp_layers = []
-        self.mlp_layers.append(Dense(input_dim=neigh_input_dim,
-                                 output_dim=hidden_dim,
-                                 act=tf.nn.relu,
-                                 dropout=dropout,
-                                 sparse_inputs=False,
-                                 logging=self.logging))
+
+        if self.svd:
+            self.mlp_layers.append(SVD(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=tf.nn.relu,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size=self.block_size,
+                                        logging=self.logging))
+        else:
+            if self.block_size == 0:
+                self.mlp_layers.append(Dense(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=tf.nn.relu,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        logging=self.logging))
+            else:
+                self.mlp_layers.append(BCM(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=tf.nn.relu,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size=self.block_size,
+                                        logging=self.logging))
+
 
         with tf.variable_scope(self.name + name + '_vars'):
-            self.vars['neigh_weights'] = glorot([hidden_dim, output_dim],
-                                                        name='neigh_weights')
+            # self.vars['neigh_weights'] = glorot([hidden_dim, output_dim],
+            #                                             name='neigh_weights')
            
-            self.vars['self_weights'] = glorot([input_dim, output_dim],
-                                                        name='self_weights')
+            # self.vars['self_weights'] = glorot([input_dim, output_dim],
+            #                                             name='self_weights')
+            if not self.cp_combination:
+                self.vars['neigh_weights'] = glorot([hidden_dim, output_dim],
+                                                            name='neigh_weights')
+            
+                self.vars['self_weights'] = glorot([input_dim, output_dim],
+                                                            name='self_weights')
+            else:
+                self.neigh_weights = BCM(input_dim = hidden_dim,
+                                        output_dim = output_dim,
+                                        act=None,
+                                        dropout=0,
+                                        sparse_inputs=False,
+                                        bias=False,
+                                        block_size= block_size,
+                                        logging=self.logging)
+
+                self.self_weights = BCM(input_dim = input_dim,
+                        output_dim = output_dim,
+                        act=None,
+                        dropout=0,
+                        sparse_inputs=False,
+                        bias=False,
+                        block_size= block_size,
+                        logging=self.logging)
+
             if self.bias:
                 self.vars['bias'] = zeros([self.output_dim], name='bias')
 
@@ -170,8 +234,10 @@ class MaxPoolingAggregator(Layer):
         neigh_h = neigh_vecs
 
         dims = tf.shape(neigh_h)
+        # print(neigh_h.get_shape())
         batch_size = dims[0]
         num_neighbors = dims[1]
+
         # [nodes * sampled neighbors] x [hidden_dim]
         h_reshaped = tf.reshape(neigh_h, (batch_size * num_neighbors, self.neigh_input_dim))
 
@@ -198,13 +264,16 @@ class MeanPoolingAggregator(Layer):
     """ Aggregates via mean-pooling over MLP functions.
     """
     def __init__(self, input_dim, output_dim, model_size="small", neigh_input_dim=None,
-            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, **kwargs):
+            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, block_size = 0, cp_combination = False,  svd = False, **kwargs):
         super(MeanPoolingAggregator, self).__init__(**kwargs)
 
         self.dropout = dropout
         self.bias = bias
         self.act = act
         self.concat = concat
+        self.svd = svd
+        self.block_size = block_size
+        self.cp_combination = cp_combination
 
         if neigh_input_dim is None:
             neigh_input_dim = input_dim
@@ -220,19 +289,59 @@ class MeanPoolingAggregator(Layer):
             hidden_dim = self.hidden_dim = 1024
 
         self.mlp_layers = []
-        self.mlp_layers.append(Dense(input_dim=neigh_input_dim,
-                                 output_dim=hidden_dim,
-                                 act=tf.nn.relu,
-                                 dropout=dropout,
-                                 sparse_inputs=False,
-                                 logging=self.logging))
+        if self.svd:
+            self.mlp_layers.append(SVD(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=tf.nn.relu,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size=self.block_size,
+                                        logging=self.logging))
+        else:
+            if block_size == 0:
+                self.mlp_layers.append(Dense(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=tf.nn.relu,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        logging=self.logging))
+
+            else:
+                self.mlp_layers.append(BCM(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=tf.nn.relu,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size= block_size,
+                                        logging=self.logging))
 
         with tf.variable_scope(self.name + name + '_vars'):
-            self.vars['neigh_weights'] = glorot([hidden_dim, output_dim],
-                                                        name='neigh_weights')
-           
-            self.vars['self_weights'] = glorot([input_dim, output_dim],
-                                                        name='self_weights')
+            if not self.cp_combination:
+                self.vars['neigh_weights'] = glorot([hidden_dim, output_dim],
+                                                            name='neigh_weights')
+            
+                self.vars['self_weights'] = glorot([input_dim, output_dim],
+                                                            name='self_weights')
+            else:
+
+                self.neigh_weights = BCM(input_dim = hidden_dim,
+                                        output_dim = output_dim,
+                                        act=None,
+                                        dropout=0,
+                                        sparse_inputs=False,
+                                        bias=False,
+                                        block_size= block_size,
+                                        logging=self.logging)
+
+                self.self_weights = BCM(input_dim = input_dim,
+                        output_dim = output_dim,
+                        act=None,
+                        dropout=0,
+                        sparse_inputs=False,
+                        bias=False,
+                        block_size= block_size,
+                        logging=self.logging)
+
             if self.bias:
                 self.vars['bias'] = zeros([self.output_dim], name='bias')
 
@@ -258,9 +367,21 @@ class MeanPoolingAggregator(Layer):
         neigh_h = tf.reshape(h_reshaped, (batch_size, num_neighbors, self.hidden_dim))
         neigh_h = tf.reduce_mean(neigh_h, axis=1)
         
-        from_neighs = tf.matmul(neigh_h, self.vars['neigh_weights'])
-        from_self = tf.matmul(self_vecs, self.vars["self_weights"])
+        # max_value = tf.reduce_max(tf.abs(neigh_h))
+
+        # noise_std =  max_value*1e-2
+
+        # random_noise = tf.random_normal(tf.shape(neigh_h), mean= 0, stddev=noise_std)
+
+        # neigh_h += random_noise
+        if not self.cp_combination:
+            from_neighs = tf.matmul(neigh_h, self.vars['neigh_weights'])
+            from_self = tf.matmul(self_vecs, self.vars["self_weights"])
         
+        else:
+            from_neighs = self.neigh_weights(neigh_h)
+            from_self = self.self_weights(self_vecs)
+
         if not self.concat:
             output = tf.add_n([from_self, from_neighs])
         else:
@@ -448,3 +569,282 @@ class SeqAggregator(Layer):
        
         return self.act(output)
 
+class GGCNAggregator(Layer):
+    def __init__(self, input_dim, output_dim, model_size="small", neigh_input_dim=None,
+            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, block_size = 0, svd = False, cp_combination = False, **kwargs):
+            super(GGCNAggregator, self).__init__(**kwargs)
+            self.dropout = dropout
+            self.bias = True
+            self.act = act
+            self.concat = concat
+
+            self.bias = bias
+
+            if neigh_input_dim is None:
+                self.neigh_input_dim = input_dim
+
+            else:
+                self.neigh_input_dim = neigh_input_dim
+
+            if name is not None:
+                name = '/' + name
+            else:
+                name = ''
+            if model_size == "small":
+                hidden_dim = self.hidden_dim = 512
+            elif model_size == "big":
+                hidden_dim = self.hidden_dim = 1024
+
+            self.mlp_layers = []
+
+            if block_size == 0:
+                self.WH = Dense(input_dim= self.neigh_input_dim,
+                                        output_dim=self.neigh_input_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        logging=self.logging)
+                self.WC = Dense(input_dim= self.neigh_input_dim,
+                        output_dim=self.neigh_input_dim,
+                        act=None,
+                        dropout=dropout,
+                        sparse_inputs=False,
+                        logging=self.logging)
+                
+                self.W = Dense(input_dim= self.neigh_input_dim,
+                        output_dim=output_dim,
+                        act=None,
+                        dropout=dropout,
+                        sparse_inputs=False,
+                        logging=self.logging)
+
+                self.self_W = Dense(input_dim= self.neigh_input_dim,
+                        output_dim=output_dim,
+                        act=None,
+                        dropout=dropout,
+                        sparse_inputs=False,
+                        logging=self.logging)
+
+            else:
+                self.WH = BCM(input_dim= self.neigh_input_dim,
+                                        output_dim=self.neigh_input_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size= block_size,
+                                        logging=self.logging)
+
+                self.WC = BCM(input_dim= self.neigh_input_dim,
+                                        output_dim=self.neigh_input_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size= block_size,
+                                        logging=self.logging)
+
+                self.W = BCM(input_dim= self.neigh_input_dim,
+                                        output_dim=output_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size= block_size,
+                                        logging=self.logging)
+
+                self.self_W = BCM(input_dim= self.neigh_input_dim,
+                        output_dim=output_dim,
+                        act=None,
+                        dropout=dropout,
+                        sparse_inputs=False,
+                        block_size= block_size,
+                        logging=self.logging)
+
+    def _call(self, inputs):
+        self_vecs, neigh_vecs = inputs
+
+        dims = tf.shape(neigh_vecs)
+        batch_size = dims[0]
+        num_neighbors = dims[1]
+
+        h_reshaped = tf.reshape(neigh_vecs, (batch_size * num_neighbors, self.neigh_input_dim))
+
+        # h_reshaped = tf.matmul(h_reshaped, self.vars['W'])
+        h_reshaped = self.WH(h_reshaped)
+
+        self_h = self.WC(self_vecs)
+
+        neigh_h = tf.reshape(h_reshaped, (batch_size, num_neighbors, self.neigh_input_dim))
+        
+        self_h = self_h[:,tf.newaxis,...]
+        
+        self_h = tf.tile(self_h, [1, num_neighbors, 1])
+
+        self_add_neigh = self_h + neigh_h
+
+        eta = tf.sigmoid(self_add_neigh)
+
+        output = neigh_vecs * eta
+
+        output = tf.reduce_sum(output,axis = 1, keepdims = False)
+
+        from_neigh = self.W(output)
+        from_self = self.self_W(self_vecs)
+
+
+        if not self.concat:
+            output = tf.add_n([from_self, from_neigh])
+        else:
+            output = tf.concat([from_self, from_neigh], axis=1)
+        
+        # bias
+        if self.bias:
+            output += self.vars['bias']
+       
+        return self.act(output)
+
+
+class GatAggregator(Layer):
+    """ Aggregates via mean-pooling over MLP functions.
+    """
+    def __init__(self, input_dim, output_dim, model_size="small", neigh_input_dim=None,
+            dropout=0., bias=False, act=tf.nn.relu, name=None, concat=False, block_size = 0, svd = False, **kwargs):
+        super(GatAggregator, self).__init__(**kwargs)
+
+        self.dropout = dropout
+        self.bias = True
+        self.act = act
+        self.concat = concat
+
+        self.K = 1
+
+        if neigh_input_dim is None:
+            neigh_input_dim = input_dim
+
+        if name is not None:
+            name = '/' + name
+        else:
+            name = ''
+
+
+        if model_size == "small":
+            hidden_dim = self.hidden_dim = 128
+        elif model_size == "big":
+            hidden_dim = self.hidden_dim = 1024
+
+        self.mlp_layers = []
+
+        if svd:
+            self.mlp_layers.append(SVD(input_dim=neigh_input_dim,
+                                    output_dim=hidden_dim,
+                                    act=None,
+                                    dropout=dropout,
+                                    sparse_inputs=False,
+                                    block_size= block_size,
+                                    logging=self.logging))
+
+        else:
+            if block_size == 0:
+                self.mlp_layers.append(Dense(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        logging=self.logging))
+
+            else:
+                self.mlp_layers.append(BCM(input_dim=neigh_input_dim,
+                                        output_dim=hidden_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size= block_size,
+                                        logging=self.logging)) 
+
+            self.W = BCM(input_dim=input_dim,
+                                        output_dim=hidden_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size= block_size,
+                                        logging=self.logging)
+
+            self.neigh_weights = BCM(input_dim=input_dim,
+                                        output_dim=hidden_dim,
+                                        act=None,
+                                        dropout=dropout,
+                                        sparse_inputs=False,
+                                        block_size= block_size,
+                                        logging=self.logging)
+
+        with tf.variable_scope(self.name + name + '_vars'):
+            self.vars['W'] = glorot([input_dim, hidden_dim],
+                                                        name='W')
+
+            for k in range(self.K):
+                self.vars['kernel_{}'.format(k)] = glorot([hidden_dim * 2, 1],
+                                                            name='kernel_{}'.format(k))
+                                                                
+                self.vars['neigh_weights_{}'.format(k)] = glorot([input_dim, output_dim],
+                                                            name='neigh_weights_{}'.format(k))
+            
+            if self.bias:
+                self.vars['bias'] = zeros([output_dim], name='bias')
+
+        if self.logging:
+            self._log_vars()
+
+        self.input_dim = input_dim
+        self.output_dim = output_dim
+        self.neigh_input_dim = neigh_input_dim
+
+    def _call(self, inputs):
+        self_vecs, neigh_vecs = inputs
+
+        dims = tf.shape(neigh_vecs)
+        batch_size = dims[0]
+        num_neighbors = dims[1]
+
+        self_vecs_expan = self_vecs[:,tf.newaxis,...]
+        all_nodes = tf.concat([neigh_vecs,self_vecs_expan],axis=1)
+
+        h_reshaped = tf.reshape(all_nodes, (batch_size * (num_neighbors + 1), self.neigh_input_dim))
+
+        # h_reshaped = tf.matmul(h_reshaped, self.vars['W'])
+        h_reshaped = self.W(h_reshaped)
+
+        neigh_h = tf.reshape(h_reshaped, (batch_size, num_neighbors+1, self.hidden_dim))
+        
+        # h_self =  tf.matmul(self_vecs, self.vars['W'])[:,tf.newaxis,...]
+        h_self = self.W(self_vecs)[:,tf.newaxis,...]
+        
+        self_h = tf.tile(h_self, [1, num_neighbors+1, 1])
+
+        att_feature = tf.concat([self_h, neigh_h], axis=2)
+
+        att_feature = tf.reshape(att_feature, (-1, self.hidden_dim * 2))
+
+        outputs = []
+        for k in range(self.K):
+            alphas = tf.nn.leaky_relu(tf.matmul(att_feature, self.vars['kernel_{}'.format(k)]))
+
+            alphas = tf.reshape(alphas, (batch_size, num_neighbors+1))
+            
+            alphas = tf.nn.softmax(alphas)[...,tf.newaxis]
+
+            alphas = tf.tile(alphas, [1,1, self.input_dim])
+
+            h = all_nodes * alphas
+            h = tf.reduce_sum(h,axis=1, keep_dims=False)
+            
+            #output = tf.matmul(h, self.vars['neigh_weights_{}'.format(k)])[...,tf.newaxis]
+
+            output = self.neigh_weights(h)[...,tf.newaxis]
+
+            outputs.append(output)
+        
+        outputs = tf.concat(outputs,axis = 2)
+        output = tf.reduce_mean(outputs,axis = 2, keepdims = False)
+        # bias
+        if self.bias:
+            output += self.vars['bias']
+       
+        return self.act(output)
